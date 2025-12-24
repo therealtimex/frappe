@@ -21,22 +21,14 @@ def setup_database():
 	if psql_version := root_conn.sql("SHOW server_version_num", as_dict=True):
 		semver_version_num = psql_version[0].get("server_version_num") or "140000"
 		if cint(semver_version_num) > 150000:
-			admin_role = frappe.flags.root_login or frappe.conf.get("root_login") or "postgres"
+			admin_role = root_conn.sql("select current_user")[0][0]
 			try:
-				is_member = root_conn.sql(
-					"""
-					select 1
-					from pg_auth_members m
-					join pg_roles r on r.oid = m.roleid
-					join pg_roles u on u.oid = m.member
-					where r.rolname = %s and u.rolname = %s
-					""",
-					(frappe.conf.db_name, admin_role),
-				)
-				if not is_member:
-					root_conn.sql(f'GRANT "{frappe.conf.db_name}" TO "{admin_role}"')
-                    # Ensure role membership is visible for privilege checks in this session.
-					root_conn.commit()
+				root_conn.sql(f'GRANT "{frappe.conf.db_name}" TO "{admin_role}"')
+				# Ensure role membership is visible for privilege checks in this session.
+				root_conn.commit()
+				root_conn.close()
+				frappe.local.flags.root_connection = None
+				root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 				can_set_role = root_conn.sql(
 					"select pg_has_role(current_user, %s, 'set')", (frappe.conf.db_name,)
 				)
