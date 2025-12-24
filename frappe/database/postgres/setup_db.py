@@ -21,7 +21,24 @@ def setup_database():
 	if psql_version := root_conn.sql("SHOW server_version_num", as_dict=True):
 		semver_version_num = psql_version[0].get("server_version_num") or "140000"
 		if cint(semver_version_num) > 150000:
-			root_conn.sql(f'ALTER DATABASE "{frappe.conf.db_name}" OWNER TO "{frappe.conf.db_name}"')
+			admin_role = frappe.flags.root_login or frappe.conf.get("root_login") or "postgres"
+			try:
+				is_member = root_conn.sql(
+					"""
+					select 1
+					from pg_auth_members m
+					join pg_roles r on r.oid = m.roleid
+					join pg_roles u on u.oid = m.member
+					where r.rolname = %s and u.rolname = %s
+					""",
+					(frappe.conf.db_name, admin_role),
+				)
+				if not is_member:
+					root_conn.sql(f'GRANT "{frappe.conf.db_name}" TO "{admin_role}"')
+				root_conn.sql(f'ALTER DATABASE "{frappe.conf.db_name}" OWNER TO "{frappe.conf.db_name}"')
+			except Exception:
+				# Remote managed Postgres may not allow role grants/ownership changes.
+				pass
 	root_conn.close()
 
 
