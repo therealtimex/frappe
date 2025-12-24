@@ -37,6 +37,7 @@ def setup_database():
 						f'Missing SET ROLE privilege for "{frappe.conf.db_name}" as "{admin_role}"'
 					)
 				root_conn.sql(f'ALTER DATABASE "{frappe.conf.db_name}" OWNER TO "{frappe.conf.db_name}"')
+				root_conn.commit()
 			except Exception:
 				# Remote managed Postgres may block role grants/ownership changes.
 				raise
