@@ -35,10 +35,19 @@ def setup_database():
 				)
 				if not is_member:
 					root_conn.sql(f'GRANT "{frappe.conf.db_name}" TO "{admin_role}"')
+                    # Ensure role membership is visible for privilege checks in this session.
+					root_conn.commit()
+				can_set_role = root_conn.sql(
+					"select pg_has_role(current_user, %s, 'set')", (frappe.conf.db_name,)
+				)
+				if not (can_set_role and can_set_role[0][0]):
+					raise Exception(
+						f'Missing SET ROLE privilege for "{frappe.conf.db_name}" as "{admin_role}"'
+					)
 				root_conn.sql(f'ALTER DATABASE "{frappe.conf.db_name}" OWNER TO "{frappe.conf.db_name}"')
 			except Exception:
-				# Remote managed Postgres may not allow role grants/ownership changes.
-				pass
+				# Remote managed Postgres may block role grants/ownership changes.
+				raise
 	root_conn.close()
 
 
