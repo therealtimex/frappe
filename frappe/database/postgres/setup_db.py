@@ -190,12 +190,39 @@ def bootstrap_database(verbose, source_sql=None):
 def import_db_from_sql(source_sql=None, verbose=False):
 	if verbose:
 		print("Starting database import...")
+	
 	db_name = frappe.conf.db_name
+	db_schema = frappe.conf.get("db_schema")
+	
 	if not source_sql:
 		source_sql = os.path.join(os.path.dirname(__file__), "framework_postgres.sql")
-	DbManager(frappe.local.db).restore_database(
-		verbose, db_name, source_sql, db_name, frappe.conf.db_password
-	)
+	
+	if db_schema:
+		# Schema mode: prepend SET search_path to the SQL file
+		# Create a temporary file with the search_path set
+		import tempfile
+		
+		with open(source_sql, 'r') as f:
+			original_sql = f.read()
+		
+		schema_sql = f'SET search_path TO "{db_schema}";\n\n' + original_sql
+		
+		with tempfile.NamedTemporaryFile(mode='w', suffix='.sql', delete=False) as tmp:
+			tmp.write(schema_sql)
+			tmp_path = tmp.name
+		
+		try:
+			DbManager(frappe.local.db).restore_database(
+				verbose, db_name, tmp_path, db_name, frappe.conf.db_password
+			)
+		finally:
+			os.unlink(tmp_path)
+	else:
+		# Traditional mode
+		DbManager(frappe.local.db).restore_database(
+			verbose, db_name, source_sql, db_name, frappe.conf.db_password
+		)
+	
 	if verbose:
 		print("Imported from database {}".format(source_sql))
 
