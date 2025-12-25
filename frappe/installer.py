@@ -560,6 +560,7 @@ def make_conf(
 	db_host=None,
 	db_port=None,
 	db_socket=None,
+	db_schema=None,
 ):
 	site = frappe.local.site
 	make_site_config(
@@ -570,6 +571,7 @@ def make_conf(
 		db_host=db_host,
 		db_port=db_port,
 		db_socket=db_socket,
+		db_schema=db_schema,
 	)
 	sites_path = frappe.local.sites_path
 	frappe.destroy()
@@ -584,6 +586,7 @@ def make_site_config(
 	db_socket=None,
 	db_host=None,
 	db_port=None,
+	db_schema=None,
 ):
 	frappe.create_folder(os.path.join(frappe.local.site_path))
 	site_file = get_site_config_path()
@@ -603,6 +606,9 @@ def make_site_config(
 
 			if db_port:
 				site_config["db_port"] = db_port
+
+			if db_schema:
+				site_config["db_schema"] = db_schema
 
 		with open(site_file, "w") as f:
 			f.write(json.dumps(site_config, indent=1, sort_keys=True))
