@@ -63,37 +63,53 @@ def _setup_schema_mode(schema_name: str):
 	
 	This mode:
 	- Does NOT drop or create databases
+	- Creates a dedicated user for the site (like traditional mode)
 	- Creates schema if not exists (idempotent)
-	- Grants privileges on schema to the db user
-	- Sets search_path for the user
+	- Grants privileges to both the site user and root user
+	- Sets search_path for the site user
 	
 	Args:
 		schema_name: PostgreSQL schema name to create.
 	"""
 	schema_name = _validate_schema_name(schema_name)
-	db_name = frappe.conf.db_name
-	db_user = frappe.conf.get("db_user") or db_name  # Fallback to db_name for user
+	
+	# Use db_name as the site user name (consistent with traditional mode)
+	site_user = frappe.conf.db_name
+	site_password = frappe.conf.db_password
+	root_user = frappe.flags.root_login
 	
 	root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 	root_conn.commit()
 	root_conn.sql("end")
 	
+	# Create or update the site user (same as traditional mode)
+	if root_conn.sql(f"SELECT 1 FROM pg_roles WHERE rolname='{site_user}'"):
+		root_conn.sql(f"ALTER USER \"{site_user}\" WITH PASSWORD '{site_password}'")
+	else:
+		root_conn.sql(f"CREATE USER \"{site_user}\" WITH PASSWORD '{site_password}'")
+	
 	# Create schema if not exists (non-destructive, idempotent)
 	root_conn.sql(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
 	
-	# Grant all privileges on schema to the user
-	root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{db_user}"')
+	# Set site user as schema owner (analogous to database owner in traditional mode)
+	root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{site_user}"')
 	
-	# Grant usage on all existing tables in schema
-	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{db_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{db_user}"')
+	# Grant all privileges on schema to the site user
+	root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
 	
-	# Set default privileges for future tables
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{db_user}"')
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{db_user}"')
+	# Set default privileges for future tables created in this schema
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{site_user}"')
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{site_user}"')
 	
-	# Set search_path for the user so tables are created in this schema
-	root_conn.sql(f'ALTER USER "{db_user}" SET search_path TO "{schema_name}"')
+	# Set search_path for the site user
+	root_conn.sql(f'ALTER USER "{site_user}" SET search_path TO "{schema_name}"')
+	
+	# Also grant USAGE to root user so they can view/manage via Supabase dashboard
+	if root_user and root_user != site_user:
+		root_conn.sql(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT SELECT ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
 	
 	root_conn.commit()
 	root_conn.close()
