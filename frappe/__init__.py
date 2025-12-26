@@ -275,11 +275,14 @@ def connect(site: str | None = None, db_name: str | None = None, set_admin_as_us
 	assert db_name or local.conf.db_name, "site must be fully initialized, db_name missing"
 	assert local.conf.db_password, "site must be fully initialized, db_password missing"
 
+	# Use db_user if configured (schema mode), otherwise fall back to db_name (traditional mode)
+	db_user = local.conf.get("db_user") or local.conf.db_name or db_name
+
 	local.db = get_db(
 		socket=local.conf.db_socket,
 		host=local.conf.db_host,
 		port=local.conf.db_port,
-		user=local.conf.db_name or db_name,
+		user=db_user,
 		password=local.conf.db_password,
 		cur_db_name=local.conf.db_name or db_name,
 	)

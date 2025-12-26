@@ -184,6 +184,12 @@ class PostgresDatabase(PostgresExceptionUtil, Database):
 		conn = psycopg2.connect(**conn_settings)
 		conn.set_isolation_level(ISOLATION_LEVEL_REPEATABLE_READ)
 
+		# Set search_path if db_schema is configured (Supabase schema-based isolation)
+		if db_schema := frappe.conf.get("db_schema"):
+			cursor = conn.cursor()
+			cursor.execute(f'SET search_path TO "{db_schema}"')
+			cursor.close()
+
 		return conn
 
 	def set_execution_timeout(self, seconds: int):
