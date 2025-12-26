@@ -264,6 +264,11 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		db_user = frappe.conf.get("db_user") or frappe.flags.root_login
 		db_password = frappe.conf.get("db_password") or frappe.flags.root_password
 		
+		print("[DEBUG] Importing into schema:", db_schema)
+		print("[DEBUG] Using DB user:", db_user, "Details:", frappe.conf.get("db_user"), "- Root Login:", frappe.flags.root_login)
+		print("[DEBUG] Using DB name:", db_name)
+		print("[DEBUG] Using DB password:", db_password)
+
 		with open(source_sql, 'r') as f:
 			original_sql = f.read()
 		
