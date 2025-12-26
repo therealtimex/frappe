@@ -243,9 +243,12 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		source_sql = os.path.join(os.path.dirname(__file__), "framework_postgres.sql")
 	
 	if db_schema:
-		# Schema mode: prepend SET search_path to the SQL file
-		# Create a temporary file with the search_path set
+		# Schema mode: user is the schema name, not db_name
+		# Prepend SET search_path to the SQL file
 		import tempfile
+		
+		db_user = db_schema  # In schema mode, user = schema name
+		db_password = frappe.conf.db_password
 		
 		with open(source_sql, 'r') as f:
 			original_sql = f.read()
@@ -258,12 +261,12 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		
 		try:
 			DbManager(frappe.local.db).restore_database(
-				verbose, db_name, tmp_path, db_name, frappe.conf.db_password
+				verbose, db_name, tmp_path, db_user, db_password
 			)
 		finally:
 			os.unlink(tmp_path)
 	else:
-		# Traditional mode
+		# Traditional mode: user = db_name
 		DbManager(frappe.local.db).restore_database(
 			verbose, db_name, source_sql, db_name, frappe.conf.db_password
 		)
