@@ -63,18 +63,19 @@ def _setup_schema_mode(schema_name: str):
 	
 	This mode:
 	- Does NOT drop or create databases
-	- Creates a dedicated user for the site (like traditional mode)
-	- Creates schema if not exists (idempotent)
-	- Grants privileges to both the site user and root user
-	- Sets search_path for the site user
+	- Creates a dedicated user named after the schema (like traditional mode)
+	- Creates schema if not exists
+	- Sets user as schema owner
+	- Grants privileges and sets search_path
 	
 	Args:
 		schema_name: PostgreSQL schema name to create.
 	"""
 	schema_name = _validate_schema_name(schema_name)
 	
-	# Use db_name as the site user name (consistent with traditional mode)
-	site_user = frappe.conf.db_name
+	# In schema mode, use schema_name as the user name
+	# This mirrors traditional mode where db_name = user_name
+	site_user = schema_name
 	site_password = frappe.conf.db_password
 	root_user = frappe.flags.root_login
 	
@@ -88,7 +89,7 @@ def _setup_schema_mode(schema_name: str):
 	else:
 		root_conn.sql(f"CREATE USER \"{site_user}\" WITH PASSWORD '{site_password}'")
 	
-	# Create schema if not exists (non-destructive, idempotent)
+	# Create schema if not exists
 	root_conn.sql(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
 	
 	# Set site user as schema owner (analogous to database owner in traditional mode)
@@ -99,14 +100,14 @@ def _setup_schema_mode(schema_name: str):
 	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
 	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
 	
-	# Set default privileges for future tables created in this schema
+	# Set default privileges for future tables
 	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{site_user}"')
 	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{site_user}"')
 	
 	# Set search_path for the site user
 	root_conn.sql(f'ALTER USER "{site_user}" SET search_path TO "{schema_name}"')
 	
-	# Also grant USAGE to root user so they can view/manage via Supabase dashboard
+	# Grant USAGE to root user so they can view via dashboard
 	if root_user and root_user != site_user:
 		root_conn.sql(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{root_user}"')
 		root_conn.sql(f'GRANT SELECT ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
@@ -114,6 +115,28 @@ def _setup_schema_mode(schema_name: str):
 	root_conn.commit()
 	root_conn.close()
 	frappe.local.flags.root_connection = None
+	
+	# Update site_config to use schema_name as db credential user
+	_update_site_config_for_schema_mode(site_user, site_password)
+
+
+def _update_site_config_for_schema_mode(site_user: str, site_password: str):
+	"""Update site_config.json with the schema user credentials."""
+	import json
+	from frappe.installer import get_site_config_path
+	
+	site_file = get_site_config_path()
+	if os.path.exists(site_file):
+		with open(site_file, 'r') as f:
+			config = json.load(f)
+		
+		# In schema mode, the user is the schema name, password stays the same
+		# db_name remains as the actual database (e.g., postgres)
+		config['db_user'] = site_user
+		config['db_password'] = site_password
+		
+		with open(site_file, 'w') as f:
+			json.dump(config, f, indent=1, sort_keys=True)
 
 
 def _setup_database_traditional():
