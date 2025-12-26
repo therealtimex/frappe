@@ -59,43 +59,67 @@ def setup_database():
 
 
 def _setup_schema_mode(schema_name: str):
-	"""Create schema within existing database (Supabase-compatible mode).
+	"""Create schema within existing database (mirrors traditional mode pattern).
 	
 	This mode:
-	- Does NOT create databases or users
-	- Uses the provided credentials (root_login/root_password) for all operations
-	- Creates schema owned by the connected user
-	- Grants privileges including Supabase roles if they exist
+	- Creates a user named after schema_name (like traditional creates from db_name)
+	- Creates schema owned by this user
+	- Handles PostgreSQL 15+ role membership requirements
+	- Grants postgres user management rights
+	- Adds Supabase role grants if they exist
 	
 	Args:
-		schema_name: PostgreSQL schema name to create.
+		schema_name: PostgreSQL schema name (also used as username).
 	"""
 	schema_name = _validate_schema_name(schema_name)
 	
-	# Use the provided credentials (root_login) for everything
-	# No separate user creation - use exactly what was provided
-	db_user = frappe.flags.root_login
-	db_password = frappe.flags.root_password
+	# Like traditional mode: user name = schema name (mirrors db_name = user)
+	site_user = schema_name
+	site_password = frappe.conf.db_password
+	root_user = frappe.flags.root_login
 	
-	root_conn = get_root_connection(db_user, db_password)
+	root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 	root_conn.commit()
 	root_conn.sql("end")
 	
-	# Create schema if not exists (idempotent)
+	# Create or update site user (same pattern as traditional mode)
+	if root_conn.sql(f"SELECT 1 FROM pg_roles WHERE rolname='{site_user}'"):
+		root_conn.sql(f"ALTER USER \"{site_user}\" WITH PASSWORD '{site_password}'")
+	else:
+		root_conn.sql(f"CREATE USER \"{site_user}\" WITH PASSWORD '{site_password}'")
+	
+	# Create schema
 	root_conn.sql(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
 	
-	# Set ownership to connected user
-	root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{db_user}"')
+	# Handle PostgreSQL 15+ role membership (same as traditional mode)
+	if psql_version := root_conn.sql("SHOW server_version_num", as_dict=True):
+		semver_version_num = psql_version[0].get("server_version_num") or "140000"
+		if cint(semver_version_num) > 150000:
+			admin_role = root_conn.sql("select current_user")[0][0]
+			root_conn.sql(f'GRANT "{site_user}" TO "{admin_role}"')
+			root_conn.commit()
+			root_conn.close()
+			frappe.local.flags.root_connection = None
+			root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 	
-	# Grant privileges to connected user
-	root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{db_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{db_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{db_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL ROUTINES IN SCHEMA "{schema_name}" TO "{db_user}"')
+	# Set site user as schema owner (mirrors database owner in traditional)
+	root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{site_user}"')
 	
-	# Set default privileges for future objects
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{db_user}"')
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{db_user}"')
+	# Grant privileges to site user
+	root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL ON ALL ROUTINES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	
+	# Default privileges for future objects
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{site_user}"')
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{site_user}"')
+	
+	# Grant root user (postgres) management rights on schema
+	if root_user and root_user != site_user:
+		root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{root_user}"')
 	
 	# Supabase-specific: Grant to anon, authenticated, service_role if they exist
 	_grant_supabase_roles(root_conn, schema_name)
@@ -104,8 +128,8 @@ def _setup_schema_mode(schema_name: str):
 	root_conn.close()
 	frappe.local.flags.root_connection = None
 	
-	# Update site_config with the actual credentials used
-	_update_site_config_credentials(db_user, db_password)
+	# Update site_config with site user credentials (consistent with traditional)
+	_update_site_config_for_schema_user(site_user, site_password)
 
 
 def _grant_supabase_roles(conn, schema_name: str):
@@ -133,8 +157,8 @@ def _grant_supabase_roles(conn, schema_name: str):
 		conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO {role}')
 
 
-def _update_site_config_credentials(db_user: str, db_password: str):
-	"""Update site_config.json with the correct credentials for runtime."""
+def _update_site_config_for_schema_user(site_user: str, site_password: str):
+	"""Update site_config.json with site user credentials."""
 	import json
 	from frappe.installer import get_site_config_path
 	
@@ -143,9 +167,9 @@ def _update_site_config_credentials(db_user: str, db_password: str):
 		with open(site_file, 'r') as f:
 			config = json.load(f)
 		
-		# Store the actual credentials used
-		config['db_user'] = db_user
-		config['db_password'] = db_password
+		# Store site user (schema name) - consistent with traditional mode
+		config['db_user'] = site_user
+		config['db_password'] = site_password
 		
 		with open(site_file, 'w') as f:
 			json.dump(config, f, indent=1, sort_keys=True)
