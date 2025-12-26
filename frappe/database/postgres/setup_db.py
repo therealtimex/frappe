@@ -158,21 +158,16 @@ def _grant_supabase_roles(conn, schema_name: str):
 
 
 def _update_site_config_for_schema_user(site_user: str, site_password: str):
-	"""Update site_config.json with site user credentials."""
-	import json
-	from frappe.installer import get_site_config_path
+	"""Update site_config.json with site user credentials.
 	
-	site_file = get_site_config_path()
-	if os.path.exists(site_file):
-		with open(site_file, 'r') as f:
-			config = json.load(f)
-		
-		# Store site user (schema name) - consistent with traditional mode
-		config['db_user'] = site_user
-		config['db_password'] = site_password
-		
-		with open(site_file, 'w') as f:
-			json.dump(config, f, indent=1, sort_keys=True)
+	Uses installer.update_site_config which updates both file AND in-memory config.
+	"""
+	from frappe.installer import update_site_config
+	
+	# Store site user (schema name) - consistent with traditional mode
+	# update_site_config updates both file and frappe.local.conf
+	update_site_config("db_user", site_user)
+	update_site_config("db_password", site_password)
 
 
 def _setup_database_traditional():
@@ -257,13 +252,13 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		source_sql = os.path.join(os.path.dirname(__file__), "framework_postgres.sql")
 	
 	if db_schema:
-		# Schema mode: use the db_user from config (set by _update_site_config_credentials)
-		# Prepend SET search_path to the SQL file
+		# Schema mode: user = db_user from config (set by _update_site_config_for_schema_user)
+		# Falls back to db_schema since site_user = schema_name
 		import tempfile
 		
-		db_user = frappe.conf.get("db_user") or frappe.flags.root_login
-		db_password = frappe.conf.get("db_password") or frappe.flags.root_password
-		
+		db_user = frappe.conf.get("db_user") or db_schema
+		db_password = frappe.conf.db_password
+
 		print("[DEBUG] Importing into schema:", db_schema)
 		print("[DEBUG] Using DB user:", db_user, "Details:", frappe.conf.get("db_user"), "- Root Login:", frappe.flags.root_login)
 		print("[DEBUG] Using DB name:", db_name)
@@ -280,7 +275,7 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		
 		try:
 			DbManager(frappe.local.db).restore_database(
-				verbose, db_name, tmp_path, db_name, db_password
+				verbose, db_name, tmp_path, db_user, db_password
 			)
 		finally:
 			os.unlink(tmp_path)
