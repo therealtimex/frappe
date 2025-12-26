@@ -280,7 +280,7 @@ def import_db_from_sql(source_sql=None, verbose=False):
 		
 		try:
 			DbManager(frappe.local.db).restore_database(
-				verbose, db_name, tmp_path, db_user, db_password
+				verbose, db_name, tmp_path, db_name, db_password
 			)
 		finally:
 			os.unlink(tmp_path)
