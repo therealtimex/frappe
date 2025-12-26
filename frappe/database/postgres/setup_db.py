@@ -92,6 +92,28 @@ def _setup_schema_mode(schema_name: str):
 	# Create schema if not exists
 	root_conn.sql(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
 	
+	# Handle PostgreSQL 15+ role membership requirement (same as traditional mode)
+	if psql_version := root_conn.sql("SHOW server_version_num", as_dict=True):
+		semver_version_num = psql_version[0].get("server_version_num") or "140000"
+		if cint(semver_version_num) > 150000:
+			admin_role = root_conn.sql("select current_user")[0][0]
+			try:
+				root_conn.sql(f'GRANT "{site_user}" TO "{admin_role}"')
+				# Ensure role membership is visible for privilege checks in this session.
+				root_conn.commit()
+				root_conn.close()
+				frappe.local.flags.root_connection = None
+				root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
+				can_set_role = root_conn.sql(
+					"select pg_has_role(current_user, %s, 'set')", (site_user,)
+				)
+				if not (can_set_role and can_set_role[0][0]):
+					raise Exception(
+						f'Missing SET ROLE privilege for "{site_user}" as "{admin_role}"'
+					)
+			except Exception:
+				raise
+	
 	# Set site user as schema owner (analogous to database owner in traditional mode)
 	root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{site_user}"')
 	
