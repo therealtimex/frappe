@@ -40,25 +40,28 @@ def _validate_schema_name(schema: str) -> str:
 	return schema
 
 
-def setup_database():
+def setup_database(force=False):
 	"""Set up database for Frappe site.
 	
 	Supports two modes:
 	- Schema mode (db_schema set): Creates PostgreSQL schema within existing database.
 	  No DROP/CREATE DATABASE operations. Used for Supabase compatibility.
 	- Traditional mode (db_schema not set): Creates new database with DROP/CREATE.
+	
+	Args:
+		force: If True, drop and recreate schema/database (for recovery).
 	"""
 	db_schema = frappe.conf.get("db_schema")
 	
 	if db_schema:
 		# Schema mode: create schema within existing database
-		_setup_schema_mode(db_schema)
+		_setup_schema_mode(db_schema, force=force)
 	else:
 		# Traditional mode: create separate database
 		_setup_database_traditional()
 
 
-def _setup_schema_mode(schema_name: str):
+def _setup_schema_mode(schema_name: str, force: bool = False):
 	"""Create schema within existing database (mirrors traditional mode pattern).
 	
 	This mode:
@@ -70,6 +73,7 @@ def _setup_schema_mode(schema_name: str):
 	
 	Args:
 		schema_name: PostgreSQL schema name (also used as username).
+		force: If True, drop existing schema and recreate (for recovery).
 	"""
 	schema_name = _validate_schema_name(schema_name)
 	
@@ -87,6 +91,10 @@ def _setup_schema_mode(schema_name: str):
 		root_conn.sql(f"ALTER USER \"{site_user}\" WITH PASSWORD '{site_password}'")
 	else:
 		root_conn.sql(f"CREATE USER \"{site_user}\" WITH PASSWORD '{site_password}'")
+	
+	# Force mode: drop existing schema and all objects (for recovery from partial state)
+	if force:
+		root_conn.sql(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
 	
 	# Create schema
 	root_conn.sql(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
@@ -313,14 +321,49 @@ def get_root_connection(root_login=None, root_password=None):
 
 
 def drop_user_and_database(db_name, root_login, root_password):
+	"""Drop database and user (traditional mode) or schema and user (schema mode).
+	
+	Automatically detects which mode to use based on db_schema config.
+	"""
+	db_schema = frappe.conf.get("db_schema")
+	
+	if db_schema:
+		# Schema mode: drop schema, not database
+		drop_schema_and_user(db_schema, root_login, root_password)
+	else:
+		# Traditional mode: drop database
+		root_conn = get_root_connection(
+			frappe.flags.root_login or root_login, frappe.flags.root_password or root_password
+		)
+		root_conn.commit()
+		root_conn.sql(
+			"SELECT pg_terminate_backend (pg_stat_activity.pid) FROM pg_stat_activity WHERE pg_stat_activity.datname = %s",
+			(db_name,),
+		)
+		root_conn.sql("end")
+		root_conn.sql(f"DROP DATABASE IF EXISTS {db_name}")
+		root_conn.sql(f"DROP USER IF EXISTS {db_name}")
+
+
+def drop_schema_and_user(schema_name, root_login=None, root_password=None):
+	"""Drop schema and associated user (for schema mode cleanup/rollback).
+	
+	Args:
+		schema_name: Schema name (also used as username in schema mode).
+		root_login: Root DB user.
+		root_password: Root DB password.
+	"""
 	root_conn = get_root_connection(
 		frappe.flags.root_login or root_login, frappe.flags.root_password or root_password
 	)
 	root_conn.commit()
-	root_conn.sql(
-		"SELECT pg_terminate_backend (pg_stat_activity.pid) FROM pg_stat_activity WHERE pg_stat_activity.datname = %s",
-		(db_name,),
-	)
 	root_conn.sql("end")
-	root_conn.sql(f"DROP DATABASE IF EXISTS {db_name}")
-	root_conn.sql(f"DROP USER IF EXISTS {db_name}")
+	
+	# Drop schema with all objects
+	root_conn.sql(f'DROP SCHEMA IF EXISTS "{schema_name}" CASCADE')
+	
+	# Drop user (same name as schema in schema mode)
+	root_conn.sql(f'DROP USER IF EXISTS "{schema_name}"')
+	
+	root_conn.commit()
+

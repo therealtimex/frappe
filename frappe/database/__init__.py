@@ -14,7 +14,7 @@ def setup_database(force, verbose=None, mariadb_user_host_login_scope=None):
 	if frappe.conf.db_type == "postgres":
 		import frappe.database.postgres.setup_db
 
-		return frappe.database.postgres.setup_db.setup_database()
+		return frappe.database.postgres.setup_db.setup_database(force)
 	else:
 		import frappe.database.mariadb.setup_db
 
