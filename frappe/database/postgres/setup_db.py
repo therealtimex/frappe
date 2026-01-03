@@ -272,11 +272,15 @@ def import_db_from_sql(source_sql=None, verbose=False):
 	# Schema mode: prepend search_path
 	if db_schema:
 		sql_content = f'SET search_path TO "{db_schema}";\n\n' + sql_content
-		db_user = frappe.conf.get("db_user") or db_schema
-		db_password = frappe.conf.db_password
-	else:
-		# Traditional mode
-		db_user = db_name
+	
+	# Use root/admin credentials for DDL operations (CREATE TABLE, etc.)
+	# Site user only has limited data permissions (SELECT, INSERT, UPDATE, DELETE)
+	db_user = frappe.flags.root_login
+	db_password = frappe.flags.root_password
+	
+	if not db_user or not db_password:
+		# Fallback for traditional mode (site user has ALL permissions)
+		db_user = frappe.conf.get("db_user") or db_schema or db_name
 		db_password = frappe.conf.db_password
 	
 	# Execute SQL using psycopg2 directly
