@@ -62,14 +62,15 @@ def setup_database(force=False):
 
 
 def _setup_schema_mode(schema_name: str, force: bool = False):
-	"""Create schema within existing database (mirrors traditional mode pattern).
+	"""Create schema within existing database (schema-based isolation).
 	
-	This mode:
-	- Creates a user named after schema_name (like traditional creates from db_name)
-	- Creates schema owned by this user
-	- Handles PostgreSQL 15+ role membership requirements
-	- Grants postgres user management rights
-	- Adds Supabase role grants if they exist
+	Security model:
+	- Schema owned by root (admin controls schema lifecycle)
+	- Site user has ALL privileges within schema (for Frappe operations)
+	- Schema provides isolation boundary (site can't access other schemas)
+	
+	This allows Frappe to function normally (DDL for migrations, custom fields,
+	app installation) while keeping sites isolated from each other.
 	
 	Args:
 		schema_name: PostgreSQL schema name (also used as username).
@@ -110,25 +111,27 @@ def _setup_schema_mode(schema_name: str, force: bool = False):
 			frappe.local.flags.root_connection = None
 			root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 	
-	# Set root user as schema owner (for DDL operations)
-	# Site user gets limited permissions for data operations only
+	# Schema owned by root (admin controls schema lifecycle)
 	if root_user:
 		root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{root_user}"')
 	
-	# Grant LIMITED privileges to site user (data operations only, no DDL)
-	root_conn.sql(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{site_user}"')
-	root_conn.sql(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
-	root_conn.sql(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	# Grant ALL privileges to site user within their schema
+	# Site user needs DDL for: migrations, app installs, custom fields, etc.
+	root_conn.sql(f'GRANT ALL PRIVILEGES ON SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA "{schema_name}" TO "{site_user}"')
 	
-	# Default privileges for future tables/sequences (site user gets data ops only)
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{site_user}"')
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT USAGE, SELECT ON SEQUENCES TO "{site_user}"')
+	# Default privileges for future objects
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL PRIVILEGES ON TABLES TO "{site_user}"')
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL PRIVILEGES ON SEQUENCES TO "{site_user}"')
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL PRIVILEGES ON FUNCTIONS TO "{site_user}"')
 	
-	# Grant root user (postgres) full management rights on schema (for migrations/DDL)
+	# Grant root user full management rights (redundant if owner, but explicit)
 	if root_user and root_user != site_user:
-		root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{root_user}"')
-		root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
-		root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT ALL PRIVILEGES ON SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
+		root_conn.sql(f'GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{root_user}"')
 	
 	# Supabase-specific: Grant to anon, authenticated, service_role if they exist
 	_grant_supabase_roles(root_conn, schema_name)
@@ -272,15 +275,11 @@ def import_db_from_sql(source_sql=None, verbose=False):
 	# Schema mode: prepend search_path
 	if db_schema:
 		sql_content = f'SET search_path TO "{db_schema}";\n\n' + sql_content
-	
-	# Use root/admin credentials for DDL operations (CREATE TABLE, etc.)
-	# Site user only has limited data permissions (SELECT, INSERT, UPDATE, DELETE)
-	db_user = frappe.flags.root_login
-	db_password = frappe.flags.root_password
-	
-	if not db_user or not db_password:
-		# Fallback for traditional mode (site user has ALL permissions)
-		db_user = frappe.conf.get("db_user") or db_schema or db_name
+		db_user = frappe.conf.get("db_user") or db_schema
+		db_password = frappe.conf.db_password
+	else:
+		# Traditional mode
+		db_user = db_name
 		db_password = frappe.conf.db_password
 	
 	# Execute SQL using psycopg2 directly
