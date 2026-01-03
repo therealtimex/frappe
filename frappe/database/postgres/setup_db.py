@@ -110,20 +110,21 @@ def _setup_schema_mode(schema_name: str, force: bool = False):
 			frappe.local.flags.root_connection = None
 			root_conn = get_root_connection(frappe.flags.root_login, frappe.flags.root_password)
 	
-	# Set site user as schema owner (mirrors database owner in traditional)
-	root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{site_user}"')
+	# Set root user as schema owner (for DDL operations)
+	# Site user gets limited permissions for data operations only
+	if root_user:
+		root_conn.sql(f'ALTER SCHEMA "{schema_name}" OWNER TO "{root_user}"')
 	
-	# Grant privileges to site user
-	root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{site_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
-	root_conn.sql(f'GRANT ALL ON ALL ROUTINES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	# Grant LIMITED privileges to site user (data operations only, no DDL)
+	root_conn.sql(f'GRANT USAGE ON SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "{schema_name}" TO "{site_user}"')
+	root_conn.sql(f'GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA "{schema_name}" TO "{site_user}"')
 	
-	# Default privileges for future objects
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON TABLES TO "{site_user}"')
-	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT ALL ON SEQUENCES TO "{site_user}"')
+	# Default privileges for future tables/sequences (site user gets data ops only)
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO "{site_user}"')
+	root_conn.sql(f'ALTER DEFAULT PRIVILEGES IN SCHEMA "{schema_name}" GRANT USAGE, SELECT ON SEQUENCES TO "{site_user}"')
 	
-	# Grant root user (postgres) management rights on schema
+	# Grant root user (postgres) full management rights on schema (for migrations/DDL)
 	if root_user and root_user != site_user:
 		root_conn.sql(f'GRANT ALL ON SCHEMA "{schema_name}" TO "{root_user}"')
 		root_conn.sql(f'GRANT ALL ON ALL TABLES IN SCHEMA "{schema_name}" TO "{root_user}"')
@@ -250,6 +251,11 @@ def bootstrap_database(verbose, source_sql=None):
 
 
 def import_db_from_sql(source_sql=None, verbose=False):
+	"""Import SQL schema into PostgreSQL database.
+	
+	Uses psycopg2 directly instead of shelling out to psql, removing the
+	psql binary dependency.
+	"""
 	if verbose:
 		print("Starting database import...")
 	
@@ -259,37 +265,81 @@ def import_db_from_sql(source_sql=None, verbose=False):
 	if not source_sql:
 		source_sql = os.path.join(os.path.dirname(__file__), "framework_postgres.sql")
 	
+	# Read SQL file
+	with open(source_sql, 'r') as f:
+		sql_content = f.read()
+	
+	# Schema mode: prepend search_path
 	if db_schema:
-		# Schema mode: user = db_user from config (set by _update_site_config_for_schema_user)
-		# Falls back to db_schema since site_user = schema_name
-		import tempfile
-		
+		sql_content = f'SET search_path TO "{db_schema}";\n\n' + sql_content
 		db_user = frappe.conf.get("db_user") or db_schema
 		db_password = frappe.conf.db_password
-
-		with open(source_sql, 'r') as f:
-			original_sql = f.read()
-		
-		schema_sql = f'SET search_path TO "{db_schema}";\n\n' + original_sql
-		
-		with tempfile.NamedTemporaryFile(mode='w', suffix='.sql', delete=False) as tmp:
-			tmp.write(schema_sql)
-			tmp_path = tmp.name
-		
-		try:
-			DbManager(frappe.local.db).restore_database(
-				verbose, db_name, tmp_path, db_user, db_password
-			)
-		finally:
-			os.unlink(tmp_path)
 	else:
-		# Traditional mode: user = db_name
-		DbManager(frappe.local.db).restore_database(
-			verbose, db_name, source_sql, db_name, frappe.conf.db_password
-		)
+		# Traditional mode
+		db_user = db_name
+		db_password = frappe.conf.db_password
+	
+	# Execute SQL using psycopg2 directly
+	_execute_sql_with_psycopg2(
+		sql_content=sql_content,
+		db_name=db_name,
+		db_user=db_user,
+		db_password=db_password,
+		db_host=frappe.conf.db_host or "localhost",
+		db_port=frappe.conf.db_port or 5432,
+		verbose=verbose,
+	)
 	
 	if verbose:
 		print("Imported from database {}".format(source_sql))
+
+
+def _execute_sql_with_psycopg2(
+	sql_content: str,
+	db_name: str,
+	db_user: str,
+	db_password: str,
+	db_host: str = "localhost",
+	db_port: int = 5432,
+	verbose: bool = False,
+):
+	"""Execute SQL content using psycopg2 directly.
+	
+	This replaces the psql-based approach, removing the psql dependency.
+	"""
+	import psycopg2
+	
+	if verbose:
+		print(f"Connecting to PostgreSQL: {db_host}:{db_port}/{db_name} as {db_user}")
+	
+	conn = psycopg2.connect(
+		host=db_host,
+		port=db_port,
+		database=db_name,
+		user=db_user,
+		password=db_password,
+	)
+	
+	try:
+		# Use autocommit for DDL statements
+		conn.autocommit = True
+		cursor = conn.cursor()
+		
+		# Execute the SQL content
+		# Split by semicolons for better error handling, but keep as single
+		# execution for performance
+		try:
+			cursor.execute(sql_content)
+		except psycopg2.Error as e:
+			if verbose:
+				print(f"SQL Error: {e}")
+			raise
+		
+		if verbose:
+			print("SQL execution completed successfully")
+			
+	finally:
+		conn.close()
 
 
 def get_root_connection(root_login=None, root_password=None):
